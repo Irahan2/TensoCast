@@ -1,0 +1,24 @@
+import numpy as np
+
+np.random.seed(42)
+
+T = 1000   # time 
+S = 30     # sensor count
+F = 1      # spec
+
+
+t = np.arange(T)
+season = 10 * np.sin(2 * np.pi * t / 288)          # daily period (I guess :D)
+trend = 0.001 * t
+base = 50 + season + trend
+
+X = np.zeros((T, S, F), dtype=np.float32)
+for s in range(S):
+    # for each sensor I added different amplitude
+    amp = 1.0 + 0.2 * np.random.randn()
+    off = 0.5 * np.random.randn()
+    noise = 2.0 * np.random.randn(T)
+    X[:, s, 0] = (base * amp) + off + noise
+
+np.savez_compressed('synthetic_metrla.npz', X=X)
+print('Saved synthetic_metrla.npz -> shape', X.shape)

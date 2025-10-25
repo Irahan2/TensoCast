@@ -1,0 +1,445 @@
+import argparse
+import os
+import sys
+import math
+import json
+import time
+import random
+from dataclasses import dataclass
+from typing import Tuple, List, Optional
+
+import numpy as np
+import pandas as pd
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_absolute_error
+
+# XGBoost 
+try:
+    from xgboost import XGBRegressor
+    _HAS_XGB = True
+except Exception:
+    _HAS_XGB = False
+
+# PyTorch
+import torch
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
+
+# TensorLy
+import tensorly as tl
+from tensorly.decomposition import parafac, tucker
+
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
+torch.manual_seed(SEED)
+
+def set_backend():
+    tl.set_backend('numpy')
+
+
+def parse_args():
+    p = argparse.ArgumentParser(description="TensoCast tek dosya iskeleti")
+    p.add_argument('--data_path', type=str, required=True,
+                   help='Veri dosyası: .npz (X:(T,S,F)) ya da .csv (T,S)')
+    p.add_argument('--decomp', type=str, choices=['cp', 'tucker'], default='cp')
+    p.add_argument('--rank', type=int, default=10, help='CP rank')
+    p.add_argument('--tucker_ranks', type=int, nargs=3, default=[6, 12, 4],
+                   help='Tucker için (R_T, R_S, R_F)')
+    p.add_argument('--window', type=int, default=12, help='Pencere uzunluğu (W)')
+    p.add_argument('--stride', type=int, default=1, help='Pencere kaydırma adımı')
+    p.add_argument('--horizons', type=int, nargs='+', default=[3, 6, 12],
+                   help='Adım cinsinden horizonlar, 5dk adım için 3=15dk')
+    p.add_argument('--train_ratio', type=float, default=0.7)
+    p.add_argument('--val_ratio', type=float, default=0.1)
+    p.add_argument('--scale', action='store_true', help='Z-skor ölçekleme')
+    p.add_argument('--model', type=str, choices=['xgb', 'lstm'], default='xgb')
+    p.add_argument('--epochs', type=int, default=15, help='LSTM epoch')
+    p.add_argument('--batch_size', type=int, default=256)
+    p.add_argument('--hidden', type=int, default=64, help='LSTM hidden size')
+    p.add_argument('--lr', type=float, default=1e-3)
+    p.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
+    p.add_argument('--results_csv', type=str, default='results.csv')
+    p.add_argument('--save_features', type=str, default=None,
+                   help='Özellik matrisi kaydı için yol (npz)')
+    p.add_argument('--load_features', type=str, default=None,
+                   help='Önceden çıkarılmış özellikleri yükle (npz)')
+    return p.parse_args()
+
+
+# The part that upload values
+
+def load_data(path: str) -> np.ndarray:
+    ext = os.path.splitext(path)[1].lower()
+    if ext == '.npz':
+        d = np.load(path)
+        if 'X' not in d:
+            raise ValueError('NPZ içinde X anahtarı bulunamadı')
+        X = d['X']  # (T, S, F)
+        if X.ndim == 2:
+            X = X[..., None]
+        return X.astype(np.float32)
+    elif ext == '.csv':
+        df = pd.read_csv(path)
+        X = df.values.astype(np.float32)  # (T, S)
+        X = X[:, :, None]  # (T, S, 1)
+        return X
+    else:
+        raise ValueError('Desteklenmeyen uzantı: %s' % ext)
+
+
+
+
+def make_windows(X: np.ndarray, W: int, stride: int, horizon: int) -> Tuple[np.ndarray, np.ndarray]:
+
+    T, S, F = X.shape
+    xs = []
+    ys = []
+    t = 0
+    while t + W + horizon <= T:
+        win = X[t:t+W]  # (W,S,F)
+        target = X[t+W+horizon-1, :, 0]  # (S,)
+        xs.append(win)
+        ys.append(target)
+        t += stride
+    if not xs:
+        raise ValueError('Window not opened. W ve horizon can be big.')
+    return np.stack(xs), np.stack(ys)
+
+
+
+
+def fit_scaler(train_array: np.ndarray) -> StandardScaler:
+    # train_array: (T_train, S, F)
+    Tt, S, F = train_array.shape
+    flat = train_array.reshape(Tt, -1)
+    sc = StandardScaler()
+    sc.fit(flat)
+    return sc
+
+
+def apply_scaler(sc: Optional[StandardScaler], X: np.ndarray) -> np.ndarray:
+    if sc is None:
+        return X
+    Tt, S, F = X.shape
+    flat = X.reshape(Tt, -1)
+    flat = sc.transform(flat)
+    return flat.reshape(Tt, S, F).astype(np.float32)
+
+
+#  Feature Extraction (please check the features functions I might have a mistake there)
+
+def cp_features(window_tensor: np.ndarray, rank: int = 10, n_iter: int = 100) -> np.ndarray:
+    # window_tensor: (W, S, F)
+    factors = parafac(window_tensor, rank=rank, n_iter_max=n_iter,
+                      init='svd', tol=1e-6, normalize_factors=True)
+    A, B, C = factors.factors  # (W,R),(S,R),(F,R)
+    time_feat = A[-1]                  # (R,)
+    space_feat = B.mean(axis=0)        # (R,)
+    feat_feat = C.mean(axis=0)         # (R,)
+    return np.concatenate([time_feat, space_feat, feat_feat])  # (3R,)
+
+
+def tucker_features(window_tensor: np.ndarray, ranks: Tuple[int, int, int], n_iter: int = 100) -> np.ndarray:
+    core, f actors = tucker(window_tensor, rank=ranks, n_iter_max=n_iter, init='random', tol=1e-4)
+    U_t, U_s, U_f = factors
+    core_vec = core.ravel()
+    time_load = U_t[-1]
+    return np.concatenate([time_load, core_vec])
+
+
+def extract_features(windows: np.ndarray, method: str, rank: int, tucker_ranks: Tuple[int,int,int]) -> np.ndarray:
+    feats = []
+    for i in range(windows.shape[0]):
+        win = windows[i]
+        if method == 'cp':
+            v = cp_features(win, rank=rank)
+        else:
+            v = tucker_features(win, ranks=tucker_ranks)
+        feats.append(v.astype(np.float32))
+    return np.stack(feats)
+
+
+# Dataset aand Loader 
+
+class TabularDataset(Dataset):
+    def __init__(self, X: np.ndarray, y: np.ndarray):
+        self.X = torch.from_numpy(X).float()
+        self.y = torch.from_numpy(y).float()
+    def __len__(self):
+        return self.X.shape[0]
+    def __getitem__(self, idx):
+        return self.X[idx], self.y[idx]
+
+
+# Models
+
+class TinyLSTM(nn.Module):
+    def __init__(self, in_dim: int, hidden: int = 64, out_dim: int = 1):
+        super().__init__()
+        self.lstm = nn.LSTM(input_size=in_dim, hidden_size=hidden, batch_first=True)
+        self.fc = nn.Linear(hidden, out_dim)
+    def forward(self, x):
+        out, _ = self.lstm(x)
+        out = out[:, -1, :]
+        return self.fc(out)
+
+
+#  Prederictions 
+
+def mape(y_true, y_pred, eps=1e-8):
+    denom = np.clip(np.abs(y_true), eps, None)
+    return np.mean(np.abs((y_true - y_pred) / denom))
+
+
+def smape(y_true, y_pred, eps=1e-8):
+    denom = np.clip((np.abs(y_true) + np.abs(y_pred)) / 2.0, eps, None)
+    return np.mean(np.abs(y_true - y_pred) / denom)
+
+
+def rmse(y_true, y_pred):
+    return math.sqrt(np.mean((y_true - y_pred) ** 2))
+
+
+# Evaluation part
+
+def train_xgb(Xtr, ytr, Xva, yva):
+    if not _HAS_XGB:
+        raise RuntimeError('xgboost bulunamadı. pip install xgboost ile kurun.')
+   
+    ytr_mean = ytr.mean(axis=1)
+    yva_mean = yva.mean(axis=1)
+    model = XGBRegressor(n_estimators=400, max_depth=6, learning_rate=0.05,
+                         subsample=0.8, colsample_bytree=0.8, tree_method='hist',
+                         random_state=SEED)
+    model.fit(Xtr, ytr_mean, eval_set=[(Xva, yva_mean)], verbose=False)
+    return model
+
+
+def predict_xgb(model, X):
+    y_mean = model.predict(X)
+    return y_mean  # (N,)
+
+
+def train_lstm(Xtr, ytr, Xva, yva, in_dim, hidden=64, lr=1e-3, epochs=15, batch_size=256, device='cpu'):
+    
+    ytr_mean = ytr.mean(axis=1, keepdims=True)
+    yva_mean = yva.mean(axis=1, keepdims=True)
+
+    
+    Xtr_t = Xtr[:, None, :]
+    Xva_t = Xva[:, None, :]
+
+    ds_tr = TabularDataset(Xtr_t, ytr_mean)
+    ds_va = TabularDataset(Xva_t, yva_mean)
+
+    dl_tr = DataLoader(ds_tr, batch_size=batch_size, shuffle=True)
+    dl_va = DataLoader(ds_va, batch_size=batch_size, shuffle=False)
+
+    model = TinyLSTM(in_dim=in_dim, hidden=hidden, out_dim=1).to(device)
+    opt = torch.optim.Adam(model.parameters(), lr=lr)
+    crit = nn.MSELoss()
+
+    best = math.inf
+    best_state = None
+
+    for epoch in range(1, epochs+1):
+        model.train()
+        tr_loss = 0.0
+        for xb, yb in dl_tr:
+            xb = xb.to(device)
+            yb = yb.to(device)
+            opt.zero_grad()
+            pred = model(xb)
+            loss = crit(pred, yb)
+            loss.backward()
+            opt.step()
+            tr_loss += loss.item() * xb.size(0)
+        tr_loss /= len(ds_tr)
+
+        model.eval()
+        va_loss = 0.0
+        with torch.no_grad():
+            for xb, yb in dl_va:
+                xb = xb.to(device)
+                yb = yb.to(device)
+                pred = model(xb)
+                loss = crit(pred, yb)
+                va_loss += loss.item() * xb.size(0)
+        va_loss /= len(ds_va)
+        print(f"Epoch {epoch:02d} | train MSE {tr_loss:.4f} | val MSE {va_loss:.4f}")
+        if va_loss < best:
+            best = va_loss
+            best_state = model.state_dict()
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
+    return model
+
+
+def predict_lstm(model, X, device='cpu'):
+    model.eval()
+    X_t = torch.from_numpy(X[:, None, :]).float().to(device)
+    with torch.no_grad():
+        y = model(X_t).squeeze(1).cpu().numpy()  # (N,)
+    return y
+
+
+# Main
+
+def run_once(X: np.ndarray, args, horizon: int) -> dict:
+    T, S, F = X.shape
+    T_train = int(T * args.train_ratio)
+    T_val = int(T * args.val_ratio)
+    T_test = T - T_train - T_val
+
+    X_train = X[:T_train]
+    X_val = X[T_train - args.window - horizon: T_train + T_val]  
+    X_test = X[T_train + T_val - args.window - horizon:]
+
+    scaler = None
+    if args.scale:
+        scaler = fit_scaler(X_train)
+        X_train = apply_scaler(scaler, X_train)
+        X_val = apply_scaler(scaler, X_val)
+        X_test = apply_scaler(scaler, X_test)
+
+    
+    W = args.window
+    windows_tr, y_tr = make_windows(X_train, W, args.stride, horizon)
+    windows_va, y_va = make_windows(X_val, W, args.stride, horizon)
+    windows_te, y_te = make_windows(X_test, W, args.stride, horizon)
+
+    # upload
+    if args.load_features and os.path.exists(args.load_features):
+        loaded = np.load(args.load_features)
+        X_tr = loaded['X_tr']; X_va = loaded['X_va']; X_te = loaded['X_te']
+    else:
+        X_tr = extract_features(windows_tr, args.decomp, args.rank, tuple(args.tucker_ranks))
+        X_va = extract_features(windows_va, args.decomp, args.rank, tuple(args.tucker_ranks))
+        X_te = extract_features(windows_te, args.decomp, args.rank, tuple(args.tucker_ranks))
+        if args.save_features:
+            np.savez_compressed(args.save_features, X_tr=X_tr, X_va=X_va, X_te=X_te)
+
+    # Guess part for pred but I am not sure 
+    if args.model == 'xgb':
+        model = train_xgb(X_tr, y_tr, X_va, y_va)
+        yhat_tr = predict_xgb(model, X_tr)
+        yhat_va = predict_xgb(model, X_va)
+        yhat_te = predict_xgb(model, X_te)
+    else:
+        model = train_lstm(X_tr, y_tr, X_va, y_va, in_dim=X_tr.shape[1], hidden=args.hidden,
+                           lr=args.lr, epochs=args.epochs, batch_size=args.batch_size, device=args.device)
+        yhat_tr = predict_lstm(model, X_tr, device=args.device)
+        yhat_va = predict_lstm(model, X_va, device=args.device)
+        yhat_te = predict_lstm(model, X_te, device=args.device)
+
+    # I took the average
+    y_tr_mean = y_tr.mean(axis=1)
+    y_va_mean = y_va.mean(axis=1)
+    y_te_mean = y_te.mean(axis=1)
+
+    res = {
+        'horizon': horizon,
+        'train_MAE': float(mean_absolute_error(y_tr_mean, yhat_tr)),
+        'val_MAE': float(mean_absolute_error(y_va_mean, yhat_va)),
+        'test_MAE': float(mean_absolute_error(y_te_mean, yhat_te)),
+        'train_RMSE': float(rmse(y_tr_mean, yhat_tr)),
+        'val_RMSE': float(rmse(y_va_mean, yhat_va)),
+        'test_RMSE': float(rmse(y_te_mean, yhat_te)),
+        'train_MAPE': float(mape(y_tr_mean, yhat_tr)),
+        'val_MAPE': float(mape(y_va_mean, yhat_va)),
+        'test_MAPE': float(mape(y_te_mean, yhat_te)),
+        'train_sMAPE': float(smape(y_tr_mean, yhat_tr)),
+        'val_sMAPE': float(smape(y_va_mean, yhat_va)),
+        'test_sMAPE': float(smape(y_te_mean, yhat_te)),
+        'n_train': int(X_tr.shape[0]),
+        'n_val': int(X_va.shape[0]),
+        'n_test': int(X_te.shape[0]),
+        'feat_dim': int(X_tr.shape[1])
+    }
+    return res
+
+
+def main():
+    set_backend()
+    args = parse_args()
+    X = load_data(args.data_path)  # (T,S,F)
+    print(f"Veri: T={X.shape[0]}, S={X.shape[1]}, F={X.shape[2]}")
+
+    all_res = []
+    for h in args.horizons:
+        print(f"\n=== Horizon {h} adım ===")
+        res = run_once(X, args, horizon=h)
+        print(json.dumps(res, indent=2))
+        all_res.append(res)
+
+    # save as CSV 
+    df = pd.DataFrame(all_res)
+    df.to_csv(args.results_csv, index=False)
+    print(f"\nSonuçlar kaydedildi: {args.results_csv}")
+
+
+if __name__ == '__main__':
+    main()
+
+
+
+RESULTS 
+ --data_path synthetic_metrla.npz --decomp tucker --tucker_ranks 6 10 2 --model lstm --window 12 --stride
+ 2 --epochs 5 --batch_size 128 --scale --horizons 3 6
+Veri: T=1000, S=30, F=1
+
+=== Horizon 3 ===
+Epoch 01 | train MSE 0.7812 | val MSE 0.5879
+Epoch 02 | train MSE 0.6775 | val MSE 0.5102
+Epoch 03 | train MSE 0.5810 | val MSE 0.4404
+Epoch 04 | train MSE 0.4971 | val MSE 0.3788
+Epoch 05 | train MSE 0.4210 | val MSE 0.3245
+{
+  "horizon": 3,
+  "train_MAE": 0.550537109375,
+  "val_MAE": 0.4877088963985443,
+  "test_MAE": 0.5369685888290405,
+  "train_RMSE": 0.6102527507905953,
+  "val_RMSE": 0.5696770511491334,
+  "test_RMSE": 0.6047781174057781,
+  "train_MAPE": 0.8008249998092651,
+  "val_MAPE": 0.6620422601699829,
+  "test_MAPE": 0.7180765271186829,
+  "train_sMAPE": 0.9603884220123291,
+  "val_sMAPE": 0.8442168235778809,
+  "test_sMAPE": 0.9234984517097473,
+  "n_train": 343,
+  "n_val": 51,
+  "n_test": 101,
+  "feat_dim": 66
+}
+
+=== Horizon ===
+Epoch 01 | train MSE 0.7870 | val MSE 0.7337
+Epoch 02 | train MSE 0.6848 | val MSE 0.6467
+Epoch 03 | train MSE 0.5911 | val MSE 0.5667
+Epoch 04 | train MSE 0.5067 | val MSE 0.4920
+Epoch 05 | train MSE 0.4323 | val MSE 0.4243
+{
+  "horizon": 6,
+  "train_MAE": 0.5536468029022217,
+  "val_MAE": 0.5651475787162781,
+  "test_MAE": 0.5615409016609192,
+  "train_RMSE": 0.6192512533708808,
+  "val_RMSE": 0.6513722203645052,
+  "test_RMSE": 0.6332912047286371,
+  "train_MAPE": 1.5206782817840576,
+  "val_MAPE": 0.9961574673652649,
+  "test_MAPE": 0.8119851350784302,
+  "train_sMAPE": 0.9296739101409912,
+  "val_sMAPE": 0.9712636470794678,
+  "test_sMAPE": 0.9247225522994995,
+  "n_train": 342,
+  "n_val": 51,
+  "n_test": 101,
+  "feat_dim": 66
+}
+
+Program saves the res in a different file 

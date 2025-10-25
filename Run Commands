@@ -1,0 +1,14 @@
+Run Commands 
+
+LSTM + TUCKER
+python main.py --data_path synthetic_metrla.npz --decomp tucker --tucker_ranks 8 12 2 --model lstm --window 12 --stride 2 --epochs 20 --batch_size 128 --scale --horizons 3 6
+
+XGBoost
+python main.py --data_path synthetic_metrla.npz --decomp tucker --tucker_ranks 8 12 2 --model xgb --window 12 --stride 2 --scale --horizons 3 6
+
+CP
+python main.py --data_path synthetic_metrla.npz --decomp cp --rank 6 --model lstm --window 12 --stride 2 --epochs 15 --batch_size 128 --scale --horizons 3
+
+For saving files as a CSV 
+python main.py --data_path synthetic_metrla.npz --decomp tucker --tucker_ranks 8 12 2 --model lstm --window 12 --stride 2 --epochs 20 --batch_size 128 --scale --results_csv genel_sonuc.csv
+

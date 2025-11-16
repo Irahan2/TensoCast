@@ -1,4 +1,4 @@
-# TensoCast Project Results - Academic Presentation
+# TensoCast Project Results 
 
 ## Project Overview
 Traffic forecasting using tensor decomposition on METR-LA dataset (207 traffic sensors, 34,272 timesteps).
@@ -22,6 +22,32 @@ Traffic forecasting using tensor decomposition on METR-LA dataset (207 traffic s
 ### 3. Tensor Decomposition
 - **CP Decomposition**: Applied with rank=30 for dimensionality reduction
 
+## Method Effects Analysis
+
+### Effect of Tensor Decomposition
+Applying CP decomposition (rank=30) to baseline methods:
+- Historical Average: 0.1381 → 0.1052 MAE (24% improvement)
+- Naive Forecast: 0.1349 → 0.0882 MAE (35% improvement)
+
+Tensor decomposition filters noise and captures underlying traffic patterns, significantly improving traditional forecasting accuracy.
+
+### Model Complexity vs Performance
+Performance ranking on normalized traffic data:
+1. Naive + CP Decomposition: MAE = 0.0882 (best)
+2. Historical Average + CP: MAE = 0.1052
+3. Traditional baselines: MAE ≈ 0.135
+4. XGBoost ensemble: MAE = 0.3498
+5. LSTM neural network: MAE = 0.47-0.54
+
+Simple methods with proper preprocessing outperform complex ML models on this dataset.
+
+### Training Data Effect
+LSTM performance with different training:
+- Quick (1 epoch, 1000 samples): MAE = 0.5401
+- Extended (20 epochs, 2000 samples): MAE = 0.4738 (12% improvement)
+
+More training helps but LSTM still needs hyperparameter tuning to compete with baselines.
+
 ## Results Summary
 
 ### Standard Models (Quick Run)
@@ -43,32 +69,21 @@ Traffic forecasting using tensor decomposition on METR-LA dataset (207 traffic s
 |-------|-----|------|------|-------|
 | LSTM (20 epochs) | 0.4738 | 0.8765 | 297.73% | 74.86% |
 
-## Key Findings
+## Results Analysis
 
-1. **Baseline Performance**: Simple baselines (Historical Average, Naive) perform surprisingly well with normalized data
-2. **Tensor Decomposition Benefits**: CP decomposition with rank=30 significantly improves baseline model accuracy
-3. **Deep Learning**: LSTM shows potential but requires more tuning for this dataset
-4. **XGBoost**: Competitive performance with tree-based approach
+Baseline methods show good performance on normalized traffic data. CP decomposition with rank=30 improves accuracy for simple models. LSTM needs additional hyperparameter tuning. XGBoost provides competitive results using ensemble methods.
 
-## Technical Implementation
+## Implementation
 
-- **Data Preprocessing**: StandardScaler normalization, sliding window (12 timesteps → 3 forecasts)
-- **Train/Val/Test Split**: 70%/10%/20%
-- **Metrics**: MAE, RMSE, MAPE, sMAPE
-- **Framework**: Python, TensorLy, PyTorch, XGBoost, scikit-learn
+Data normalized with StandardScaler. Sliding window approach: 12 timesteps input, 3 timesteps forecast. Split: 70% train, 10% validation, 20% test. Evaluation metrics: MAE, RMSE, MAPE, sMAPE.
 
-## Files Generated
-- `metrics_baseline.csv`: All models comparison
-- `metrics_lstm_improved.csv`: Improved LSTM results
-- `lstm_predictions.png`: Sample prediction visualization
-- `metrics_comparison.png`: Model comparison charts
-- `lstm_predictions_improved.png`: Improved LSTM predictions
+## Output Files
+- `metrics_baseline.csv` - model comparison results
+- `metrics_lstm_improved.csv` - LSTM results with more training
+- `lstm_predictions.png` - prediction plots
+- `metrics_comparison.png` - performance comparison
+- `lstm_predictions_improved.png` - updated LSTM plots
 
-## Conclusion
-The project successfully demonstrates:
-1. End-to-end traffic forecasting pipeline
-2. Benefits of tensor decomposition for time series
-3. Comparison of classical vs. modern ML approaches
-4. Production-ready code with clean interfaces
+## Summary
 
-Ready for academic presentation with comprehensive results and visualizations.
+This work presents a traffic forecasting system using multiple approaches. Tensor decomposition shows promise for improving traditional methods. Results compare baseline and advanced ML techniques on real traffic data.

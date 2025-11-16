@@ -17,14 +17,10 @@ def run_pipeline(data_path: str = 'data/processed/METR-LA.h5', window_size: int 
                 lstm_batch: int = 64, lstm_lr: float = 1e-3,
                 xgb_estimators: int = 100, xgb_max_depth: int = 6, xgb_lr: float = 0.1):
     
-    print("Loading data...")
     data, timestamps, sensor_ids = load_metr_la_data(data_path)
-    print(f"Data shape: {data.shape}")
     X_train, X_val, X_test, y_train, y_val, y_test, scaler = prepare_data(
         data, window_size, horizon, use_decomposition, rank, limit_samples
     )
-    
-    print(f"Train: {X_train.shape}, Val: {X_val.shape}, Test: {X_test.shape}")
     
     results = {}
     
@@ -32,51 +28,41 @@ def run_pipeline(data_path: str = 'data/processed/METR-LA.h5', window_size: int 
         models = ['ha', 'naive', 'lstm', 'xgb']
 
     if 'ha' in models:
-        print("\nTraining Historical Average baseline...")
         ha = HistoricalAverage(window_size=window_size)
         ha.fit(X_train, y_train)
         y_pred_ha = ha.predict(X_test, horizon=horizon)
         results['HistoricalAverage'] = calculate_all_metrics(y_test, y_pred_ha)
     
     if 'naive' in models:
-        print("Training Naive baseline...")
         naive = NaiveForecast()
         naive.fit(X_train, y_train)
         y_pred_naive = naive.predict(X_test, horizon=horizon)
         results['Naive'] = calculate_all_metrics(y_test, y_pred_naive)
     
     if 'lstm' in models:
-        print("\nTraining LSTM model...")
         lstm = LSTMForecaster(input_dim=X_train.shape[2], hidden_dim=lstm_hidden, num_layers=lstm_layers,
                               horizon=horizon, dropout=0.2, learning_rate=lstm_lr)
-        lstm.fit(X_train, y_train, X_val, y_val, epochs=lstm_epochs, batch_size=lstm_batch, verbose=True)
+        lstm.fit(X_train, y_train, X_val, y_val, epochs=lstm_epochs, batch_size=lstm_batch)
         y_pred_lstm = lstm.predict(X_test)
         results['LSTM'] = calculate_all_metrics(y_test, y_pred_lstm)
     
     if 'xgb' in models:
-        print("\nTraining XGBoost model...")
         xgb_model = XGBForecaster(horizon=horizon, n_estimators=xgb_estimators, max_depth=xgb_max_depth, learning_rate=xgb_lr)
         xgb_model.fit(X_train, y_train)
         y_pred_xgb = xgb_model.predict(X_test)
         results['XGBoost'] = calculate_all_metrics(y_test, y_pred_xgb)
     
-    print("\nResults:")
     for model, metrics in results.items():
-        print(f"\n{model}:")
-        for metric, value in metrics.items():
-            print(f"  {metric}: {value:.4f}")
+        print(f"{model}: MAE={metrics['mae']:.4f}")
     
     os.makedirs('results/figures', exist_ok=True)
     save_results_table(results, 'results/metrics.csv')
-    
-    fig = plot_metrics_comparison(results, save_path='results/figures/metrics_comparison.png')
+    plot_metrics_comparison(results, save_path='results/figures/metrics_comparison.png')
     
     if 'lstm' in models:
-        fig2 = plot_predictions(y_test, y_pred_lstm, sensor_idx=0, horizon_step=0,
-                               n_samples=200, title='LSTM Predictions (Sensor 0, Horizon 1)')
-        fig2.savefig('results/figures/lstm_predictions.png', dpi=300, bbox_inches='tight')
-    
-    print("\nResults saved to results/")
+        fig = plot_predictions(y_test, y_pred_lstm, sensor_idx=0, horizon_step=0,
+                               n_samples=200, title='LSTM Predictions')
+        fig.savefig('results/figures/lstm_predictions.png', dpi=300, bbox_inches='tight')
     return results
 
 
@@ -86,7 +72,6 @@ def prepare_data(data: np.ndarray, window_size: int, horizon: int,
     data_normalized, scaler = normalize_data(data, method='standard')
 
     if use_decomposition:
-        print(f"Applying CP decomposition (rank={rank})...")
         weights, factors, _ = cp_decomposition(data_normalized, rank=rank)
         data_normalized = reconstruct_from_cp(weights, factors)
 

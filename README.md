@@ -1,6 +1,6 @@
 # TensoCast
 
-Traffic forecasting with tensor decomposition, LSTM, XGBoost, and simple baselines on the METR-LA dataset.
+Traffic forecasting using tensor decomposition and machine learning on METR-LA dataset.
 
 ## 1) Install
 
@@ -16,13 +16,13 @@ Place the dataset at:
 
 - `data/processed/METR-LA.h5`
 
-If your file is already there (default in this repo), you’re set.
+
 
 ## 3) Run
 
-Always run as a module so the `src` package resolves correctly.
+Run as module:
 
-Quick smoke test (fast, baselines only):
+Baselines only:
 
 ```powershell
 python -m src.main --models ha,naive --quick
@@ -63,9 +63,7 @@ python -m src.main --models ha,naive,lstm --use-decomposition --rank 50
 - `--use-decomposition` (flag): Apply CP decomposition to normalized data
 - `--rank` (int): CP rank if `--use-decomposition` is set
 
-Notes:
-- LSTM and XGB use sensible defaults inside `src/main.py`; override via quick mode or edit there if needed.
-- On Windows/PowerShell, the above commands are copy-paste ready.
+
 
 ## Outputs
 
@@ -84,7 +82,7 @@ Notes:
 - `src/metrics.py`: mae, rmse, mape, smape
 - `src/visualization.py`: Plots and results table
 
-## Troubleshooting
+## Notes
 
-- If you see `ModuleNotFoundError: No module named 'src'`, run with `python -m src.main ...` from the repo root (as shown above).
-- If plots don’t show, they’re still saved under `results/figures/`.
+- Run from repo root as module: `python -m src.main`
+- Plots saved to `results/figures/`

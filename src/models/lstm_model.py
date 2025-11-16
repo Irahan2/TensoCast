@@ -46,7 +46,7 @@ class LSTMForecaster:
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=learning_rate)
         
     def fit(self, X_train: np.ndarray, y_train: np.ndarray, X_val: Optional[np.ndarray] = None,
-            y_val: Optional[np.ndarray] = None, epochs: int = 50, batch_size: int = 32, verbose: bool = True):
+            y_val: Optional[np.ndarray] = None, epochs: int = 50, batch_size: int = 32):
         train_dataset = TimeSeriesDataset(X_train, y_train)
         train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
         
@@ -62,8 +62,8 @@ class LSTMForecaster:
                 self.optimizer.step()
                 epoch_loss += loss.item()
             
-            if verbose and (epoch + 1) % 10 == 0:
-                print(f'Epoch [{epoch+1}/{epochs}], Loss: {epoch_loss/len(train_loader):.4f}')
+            if (epoch + 1) % 10 == 0:
+                pass
     
     def predict(self, X: np.ndarray) -> np.ndarray:
         self.model.eval()

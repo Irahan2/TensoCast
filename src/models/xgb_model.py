@@ -11,7 +11,7 @@ class XGBForecaster:
         self.learning_rate = learning_rate
         self.models = []
         
-    def fit(self, X_train: np.ndarray, y_train: np.ndarray, verbose: bool = False):
+    def fit(self, X_train: np.ndarray, y_train: np.ndarray):
         n_samples, seq_len, n_sensors = X_train.shape
         X_train_flat = X_train.reshape(n_samples, -1)
         
